@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: git cow-worktree <branch> <path> [<start-point>]" >&2
+  exit 2
+}
+
+[[ $# -eq 2 || $# -eq 3 ]] || usage
+branch=$1
+path=$2
+start=${3:-HEAD}
+
+src=$(git rev-parse --show-toplevel)
+[[ -e $path ]] && { echo "git-cow-worktree: $path already exists" >&2; exit 1; }
+
+created_branch=false
+git show-ref --verify --quiet "refs/heads/$branch" || created_branch=true
+remote_matches=$(git for-each-ref --format=x "refs/remotes/*/$branch" | wc -l)
+if ! $created_branch || [[ $remote_matches -eq 1 ]]; then
+  git -C "$src" worktree add --no-checkout "$(realpath -m "$path")" "$branch"
+else
+  git -C "$src" worktree add --no-checkout -b "$branch" "$(realpath -m "$path")" "$start"
+fi
+dst=$(realpath "$path")
+
+cleanup() {
+  echo "git-cow-worktree: failed, removing $dst" >&2
+  git -C "$src" worktree remove --force "$dst" || true
+  if $created_branch; then
+    git -C "$src" branch -q -D "$branch" || true
+  fi
+}
+trap cleanup ERR
+
+nested_worktrees() {
+  git -C "$src" worktree list --porcelain -z \
+    | awk -v RS='\0' -v src="$src/" 'sub(/^worktree /, "") && index($0 "/", src) == 1 { print substr($0 "/", length(src) + 1) }'
+}
+
+uncopyable_paths() {
+  git -C "$src" ls-files -z --deleted
+  git -C "$src" ls-files -z --stage | awk -v RS='\0' -v ORS='\0' '/^160000 / { sub(/^[^\t]*\t/, ""); print }'
+}
+
+copyable() {
+  awk -v RS='\0' -v ORS='\0' -v prefixes="$(nested_worktrees)" '
+    BEGIN { n = split(prefixes, p, "\n") }
+    FILENAME == ARGV[1] { skip[$0] = 1; next }
+    $0 in skip { next }
+    { for (i = 1; i <= n; i++) if (p[i] != "" && index($0, p[i]) == 1) next; print }' <(uncopyable_paths) -
+}
+
+{
+  git -C "$src" ls-files -z --cached
+  git -C "$src" ls-files -z --others --ignored --exclude-standard
+} | copyable \
+  | (cd "$src" && xargs -0 -r cp -a --reflink=always --parents -t "$dst" --)
+
+git -C "$dst" reset -q
+git -C "$dst" reset -q --hard
+git -C "$dst" clean -q -fd
+
+trap - ERR
+echo "git-cow-worktree: $dst on $branch (reflinked from $src)" >&2

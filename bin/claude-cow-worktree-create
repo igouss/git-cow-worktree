@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+input=$(cat)
+name=$(jq -r '.name' <<<"$input")
+cwd=$(jq -r '.cwd' <<<"$input")
+
+if [[ ! $name =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+  echo "claude-cow-worktree-create: refusing worktree name '$name'" >&2
+  exit 1
+fi
+
+src=$(git -C "$cwd" rev-parse --show-toplevel)
+main=$(dirname "$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir)")
+path="$main/.claude/worktrees/$name"
+
+if git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "$path"
+  exit 0
+fi
+
+settings_files=()
+for f in "$HOME/.claude/settings.json" "$main/.claude/settings.json" "$main/.claude/settings.local.json"; do
+  [[ -f $f ]] && settings_files+=("$f")
+done
+base_ref=$(jq -rs 'map(.worktree.baseRef // empty) | last // "fresh"' "${settings_files[@]}" /dev/null)
+
+if [[ $base_ref == fresh ]] && git -C "$src" rev-parse --verify --quiet refs/remotes/origin/HEAD >/dev/null; then
+  start=$(git -C "$src" rev-parse refs/remotes/origin/HEAD)
+else
+  start=HEAD
+fi
+
+(cd "$src" && git-cow-worktree "worktree-$name" "$path" "$start") >&2
+echo "$path"

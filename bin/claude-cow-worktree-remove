@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+path=$(jq -r '.worktree_path')
+main=$(dirname "$(git -C "$path" rev-parse --path-format=absolute --git-common-dir)")
+branch="worktree-$(basename "$path")"
+
+git -C "$main" worktree remove --force "$path"
+if git -C "$main" show-ref --verify --quiet "refs/heads/$branch"; then
+  git -C "$main" branch -q -D "$branch"
+fi
